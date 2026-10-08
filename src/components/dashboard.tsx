@@ -98,7 +98,7 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
     if (!aiConsent) { tell("Please review and accept the AI data notice before continuing."); return; }
     setBusy(true); setMessage(""); setToolOutput("");
     try {
-      const result = await api<{ output: string; creditsUsed: number }>("/api/tools", { method: "POST", body: JSON.stringify({ tool, answer, idempotencyKey: crypto.randomUUID() }) });
+      const result = await api<{ output: string; creditsUsed: number }>("/api/tools", { method: "POST", body: JSON.stringify({ tool, answer, consent: true, idempotencyKey: crypto.randomUUID() }) });
       setToolOutput(result.output); setBalance((current) => current - result.creditsUsed); tell(`Done. ${result.creditsUsed} credit${result.creditsUsed === 1 ? "" : "s"} used.`);
     } catch (error) { tell(error instanceof Error ? error.message : "Generation failed."); }
     finally { setBusy(false); }

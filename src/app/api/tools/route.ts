@@ -63,8 +63,9 @@ export async function POST(request: Request) {
   if (authError || !auth.user) return NextResponse.json({ error: "Sign in required." }, { status: 401 });
   let body: unknown;
   try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid JSON." }, { status: 400 }); }
-  const input = body as { tool?: unknown; answer?: unknown; idempotencyKey?: unknown } | null;
+  const input = body as { tool?: unknown; answer?: unknown; consent?: unknown; idempotencyKey?: unknown } | null;
   if (!input || typeof input.tool !== "string" || !Object.hasOwn(toolActions, input.tool)) return NextResponse.json({ error: "Unknown career tool." }, { status: 400 });
+  if (input.consent !== true) return NextResponse.json({ error: "Consent is required before profile data is sent to AI." }, { status: 400 });
   const tool = input.tool as keyof typeof toolActions;
   const answer = safeText(input.answer, 5000);
   if (tool === "interview" && answer.length < 30) return NextResponse.json({ error: "Add at least 30 characters for useful interview feedback." }, { status: 400 });
