@@ -11,7 +11,7 @@ The repository does not contain production credentials and must not receive real
 
 ## 2. Supabase migrations and secrets
 
-Apply migrations to staging first and verify migrations + pgTAP. Inspect schema changes and data impacts before production rollout. Use the Supabase Dashboard or a linked, protected production deployment workflow; never reset a live database.
+Apply migrations to staging first and verify migrations + pgTAP. Inspect schema changes and data impacts before production rollout. Use the Supabase Dashboard or a linked, protected production deployment workflow; never reset a live database. Migration `202610080005_structured_candidate_profiles.sql` adds the private structured career-data field. Apply it before deploying code that selects or writes that field.
 
 Set the following in Vercel **Production** and **Preview** environments as appropriate. Keep production-only credentials out of Preview; use staging services there.
 
@@ -48,7 +48,7 @@ Before launch, publish the actual data controller, privacy contact, terms, refun
 
 The app's current cleanup job redacts account email from failed/expired payment orders after 30 days and successful orders after 90 days. Account deletion removes Auth identity, profile and course completions, detaches ledger rows, and redacts order email, while retaining payment reference/amount/currency/provider transaction ID for reconciliation. These are implementation defaults, **not a determination of legally appropriate retention**. Confirm the schedule against tax, dispute, refund, and privacy duties; revise the migration and notice before launch if needed. Supabase backups and Vercel/Supabase operational logs may outlive in-app deletion. Set access and retention in each provider dashboard and document the exceptions to deletion.
 
-Gemini career-tool requests are transient at the app layer; review Google's current API data terms and project settings before enabling it. Google Search grounding for salary research requires an active billed Gemini API project and Google says it retains grounding prompts and outputs for 30 days. Give candidates a clear opt-in before sending job title/location to Google. Avoid sending fields that are not needed. Configure Vercel/Supabase data processing terms and region consistently with the published notice.
+Gemini career-tool requests are transient at the app layer; review Google's current API data terms and project settings before enabling it. Google Search grounding for salary, job, and learning research requires an active billed Gemini API project; Google may retain grounding prompts and outputs for 30 days. Give candidates a clear opt-in before sending role, location, skills, or career summary. Avoid sending fields that are not needed. Public-web search does not access private WhatsApp/Telegram chats; those sources require a separately approved connector and explicit user/group authorization. Configure Vercel/Supabase data processing terms and region consistently with the published notice.
 
 ## 5. GitHub CI and Vercel deployment
 

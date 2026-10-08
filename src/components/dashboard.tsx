@@ -3,9 +3,10 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { CreditEntry, CreditPackage, Profile } from "@/lib/database.types";
+import { emptyCareerProfileData, type CareerProfileData, type CreditEntry, type CreditPackage, type Profile } from "@/lib/database.types";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
-import { extractLinkedInPdfText, parseLinkedInExports } from "@/lib/linkedin-export";
+import { extractLinkedInPdfText, parseLinkedInExports, sanitizeLinkedInPdfText } from "@/lib/linkedin-export";
+import { mergeCareerProfileData, normalizeCareerProfileData } from "@/lib/candidate-profile";
 
 type Tool = "roadmap" | "cv" | "linkedin" | "interview";
 type Course = { id: string; title: string; category: string; duration_minutes: number; description: string; lesson: string; quiz_question: string; quiz_options: string[] };
@@ -13,6 +14,7 @@ type Completion = { id: string; course_id: string; completed_at: string; certifi
 type SalaryInsight = { title: string; location: string; method: "official_wages" | "grounded_search"; low?: number; median?: number; high?: number; rateType?: string; dataYear: string; source?: string; sourceUrl?: string; summary?: string; sources?: Array<{ url: string; title: string }>; searchSuggestion?: string };
 type AdminUser = { id: string; email: string; full_name: string; role: "candidate" | "admin" | "owner"; credits: number };
 type Opportunity = { id: string; title: string; company: string; region: string; salary_range: string; description: string; required_skills: string[]; application_url: string | null; unlocked: boolean; matchScore: number; active?: boolean };
+type CuratedItem = { title: string; organization: string; location: string; description: string; url: string; fit: string };
 type SpeechRecognitionLike = {
   lang: string;
   interimResults: boolean;
@@ -34,6 +36,10 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
 export function Dashboard({ initialProfile, initialBalance, email }: { initialProfile: Profile; initialBalance: number; email: string }) {
   const router = useRouter();
   const [profile, setProfile] = useState(initialProfile);
+  const [careerData, setCareerData] = useState<CareerProfileData>(normalizeCareerProfileData(initialProfile.career_data || emptyCareerProfileData));
+  const [pendingImportText, setPendingImportText] = useState("");
+  const [importSuggestion, setImportSuggestion] = useState<CareerProfileData | null>(null);
+  const [profileImportConsent, setProfileImportConsent] = useState(false);
   const [balance, setBalance] = useState(initialBalance);
   const [entries, setEntries] = useState<CreditEntry[]>([]);
   const [message, setMessage] = useState("");
@@ -51,6 +57,12 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [creditAdjustments, setCreditAdjustments] = useState<Record<string, string>>({});
   const [jobs, setJobs] = useState<Opportunity[]>([]);
+  const [curatedJobs, setCuratedJobs] = useState<CuratedItem[]>([]);
+  const [curatedCourses, setCuratedCourses] = useState<CuratedItem[]>([]);
+  const [jobSearchSuggestion, setJobSearchSuggestion] = useState("");
+  const [learningSearchSuggestion, setLearningSearchSuggestion] = useState("");
+  const [jobSearchConsent, setJobSearchConsent] = useState(false);
+  const [learningSearchConsent, setLearningSearchConsent] = useState(false);
   const [salaryInsight, setSalaryInsight] = useState<SalaryInsight | null>(null);
   const [salaryMessage, setSalaryMessage] = useState("");
   const [salarySearchConsent, setSalarySearchConsent] = useState(false);
@@ -76,7 +88,7 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
     event.preventDefault(); setBusy(true); setMessage("");
     const form = new FormData(event.currentTarget);
     const update = Object.fromEntries(["full_name", "linkedin_url", "target_role", "target_region", "target_salary", "nationality", "languages", "skills", "resume_bio"].map((key) => [key, String(form.get(key) || "")]));
-    try { const result = await api<{ profile: Profile }>("/api/profile", { method: "PATCH", body: JSON.stringify(update) }); setProfile(result.profile); tell("Your profile was saved securely."); }
+    try { const result = await api<{ profile: Profile }>("/api/profile", { method: "PATCH", body: JSON.stringify({ ...update, career_data: careerData }) }); setProfile(result.profile); setCareerData(normalizeCareerProfileData(result.profile.career_data)); tell("Your profile was saved securely."); }
     catch (error) { tell(error instanceof Error ? error.message : "Profile save failed."); }
     finally { setBusy(false); }
     }
@@ -95,11 +107,9 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
   function importLinkedInText() {
     const text = linkedinImportRef.current?.value.trim();
     if (!text) { tell("Paste some profile text first."); return; }
-    const summary = document.querySelector<HTMLTextAreaElement>('[name="resume_bio"]');
-    if (!summary) return;
-    const current = summary.value.trim();
-    summary.value = current ? `${current}\n\n${text}`.slice(0, 4000) : text.slice(0, 4000);
-    tell("Profile text added to your experience summary. Review it, remove anything sensitive, then save your profile.");
+    setPendingImportText(sanitizeLinkedInPdfText(text).slice(0, 30000));
+    setImportSuggestion(null); setProfileImportConsent(false);
+    tell("Profile text is ready. You can opt in to have AI organize it into your Candidate Vault.");
   }
 
   async function importLinkedInFiles(event: FormEvent<HTMLInputElement>) {
@@ -107,22 +117,56 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
     const files = Array.from(input.files || []);
     input.value = "";
     if (!files.length) return;
-    if (files.length > 10 || files.some((file) => (!file.name.toLowerCase().endsWith(".csv") && !file.name.toLowerCase().endsWith(".pdf")) || file.size > 15_000_000)) {
-      tell("Choose a LinkedIn profile PDF or up to 10 CSV files, each no larger than 15 MB."); return;
+    if (files.length > 10 || files.some((file) => (!/\.(csv|pdf|docx)$/i.test(file.name)) || file.size > 15_000_000)) {
+      tell("Choose a CV or LinkedIn PDF, DOCX, or up to 10 supported career CSV files, each no larger than 15 MB."); return;
     }
     try {
-      const pdfs = files.filter((file) => file.name.toLowerCase().endsWith(".pdf"));
-      if (pdfs.length > 1 || (pdfs.length && files.length > 1)) { tell("Choose one LinkedIn PDF at a time, or select multiple career CSV files."); return; }
-      const result = pdfs.length
-        ? { summary: await extractLinkedInPdfText(await pdfs[0].arrayBuffer()), skills: [], importedFiles: ["LinkedIn profile PDF"] }
-        : parseLinkedInExports(await Promise.all(files.map(async (file) => ({ name: file.name, text: await file.text() }))));
-      if (!result.importedFiles.length || !result.summary && !result.skills.length) { tell("No readable career profile data was found. Select LinkedIn's Save to PDF profile or supported career CSV files."); return; }
-      const summary = document.querySelector<HTMLTextAreaElement>('[name="resume_bio"]');
-      if (summary && result.summary) summary.value = [summary.value.trim(), result.summary].filter(Boolean).join("\n\n").slice(0, 4000);
-      const skills = document.querySelector<HTMLInputElement>('[name="skills"]');
-      if (skills && result.skills.length) skills.value = Array.from(new Set([...skills.value.split(",").map((value) => value.trim()).filter(Boolean), ...result.skills])).join(", ").slice(0, 1600);
-      tell(`Imported ${result.importedFiles.join(", ")} locally. Review the fields, remove anything you do not want to save, then save your profile.`);
-    } catch { tell("Those CSV files could not be read. Please try extracting the LinkedIn archive again."); }
+      const documents = files.filter((file) => /\.(pdf|docx)$/i.test(file.name));
+      const csvFiles = files.filter((file) => file.name.toLowerCase().endsWith(".csv"));
+      if (documents.length > 1 || (documents.length && csvFiles.length)) { tell("Choose one CV/LinkedIn PDF or DOCX, or select multiple career CSV files."); return; }
+      let extracted = "";
+      if (documents[0]?.name.toLowerCase().endsWith(".pdf")) extracted = await extractLinkedInPdfText(await documents[0].arrayBuffer());
+      else if (documents[0]) {
+        const mammoth = await import("mammoth");
+        const result = await mammoth.extractRawText({ arrayBuffer: await documents[0].arrayBuffer() });
+        extracted = result.value;
+      } else if (csvFiles.length) {
+        const result = parseLinkedInExports(await Promise.all(csvFiles.map(async (file) => ({ name: file.name, text: await file.text() }))));
+        extracted = [result.summary, result.skills.length ? `Skills\n${result.skills.join(", ")}` : ""].filter(Boolean).join("\n\n");
+      }
+      extracted = sanitizeLinkedInPdfText(extracted);
+      if (extracted.trim().length < 80) { tell("No readable career profile content was found. Try a text-based PDF/DOCX or supported LinkedIn career CSV files."); return; }
+      setPendingImportText(extracted.slice(0, 30000)); setImportSuggestion(null); setProfileImportConsent(false);
+      tell(`Read ${documents[0]?.name || `${csvFiles.length} career CSV file(s)`} locally. Choose whether to send its text to Google Gemini for profile structuring.`);
+    } catch { tell("That document could not be read. Try a text-based PDF or DOCX, or supported LinkedIn career CSV files."); }
+  }
+
+  async function structureImportedProfile() {
+    if (!profileImportConsent) { tell("Please consent before sending document text to Google Gemini."); return; }
+    setBusy(true); setMessage("");
+    try {
+      const result = await api<{ profile: CareerProfileData }>("/api/profile/import", { method: "POST", body: JSON.stringify({ text: pendingImportText, consent: true }) });
+      setImportSuggestion(normalizeCareerProfileData(result.profile));
+      tell("AI organized the document into a reviewable profile suggestion. Nothing has been saved yet.");
+    } catch (error) { tell(error instanceof Error ? error.message : "Profile structuring failed."); }
+    finally { setBusy(false); }
+  }
+
+  function acceptProfileSuggestion() {
+    if (!importSuggestion) return;
+    const merged = mergeCareerProfileData(careerData, importSuggestion);
+    setCareerData(merged);
+    const fullName = document.querySelector<HTMLInputElement>('[name="full_name"]');
+    if (fullName && !fullName.value.trim() && merged.fullName) fullName.value = merged.fullName;
+    const skills = document.querySelector<HTMLInputElement>('[name="skills"]');
+    if (skills) skills.value = Array.from(new Set([...skills.value.split(",").map((item) => item.trim()).filter(Boolean), ...merged.skills])).join(", ").slice(0, 1600);
+    const summary = document.querySelector<HTMLTextAreaElement>('[name="resume_bio"]');
+    if (summary && !summary.value.trim() && merged.summary) summary.value = merged.summary.slice(0, 4000);
+    const target = document.querySelector<HTMLInputElement>('[name="target_role"]');
+    if (target && !target.value.trim() && merged.targetRoles[0]) target.value = merged.targetRoles[0];
+    const languages = document.querySelector<HTMLInputElement>('[name="languages"]');
+    if (languages && !languages.value.trim() && merged.languages.length) languages.value = merged.languages.join(", ").slice(0, 300);
+    setImportSuggestion(null); setPendingImportText(""); tell("Profile suggestions accepted. Review the fields, then save your profile to persist them.");
   }
 
   function toggleVoiceCapture() {
@@ -203,6 +247,19 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
     setJobs(result.jobs);
   }
 
+  async function findRecommendations(kind: "jobs" | "learning") {
+    const consent = kind === "jobs" ? jobSearchConsent : learningSearchConsent;
+    if (!consent) { tell("Please consent before sending profile details for public web search."); return; }
+    setBusy(true); setMessage("");
+    try {
+      const result = await api<{ items: CuratedItem[]; sources: Array<{ url: string; title: string }>; searchSuggestion: string }>("/api/recommendations", { method: "POST", body: JSON.stringify({ kind, consent: true }) });
+      if (kind === "jobs") { setCuratedJobs(result.items); setJobSearchSuggestion(result.searchSuggestion); }
+      else { setCuratedCourses(result.items); setLearningSearchSuggestion(result.searchSuggestion); }
+      tell(`${result.items.length} source-linked ${kind === "jobs" ? "job opportunities" : "learning resources"} found. Check each listing directly before applying or enrolling.`);
+    } catch (error) { tell(error instanceof Error ? error.message : "Recommendations could not be loaded."); }
+    finally { setBusy(false); }
+  }
+
   async function loadSalaryInsight() {
     if (!profile.target_role.trim() || !profile.target_region.trim()) {
       setSalaryMessage("Save a target job title and a U.S. location first (city, state; state abbreviation; or ZIP code).");
@@ -259,7 +316,10 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
       <nav aria-label="Candidate hub sections" className="no-print mb-6 flex gap-2 overflow-x-auto pb-2 text-xs">{[["#candidate-vault","Profile"],["#career-studio","Career tools"],["#opportunities","Opportunities"],["#learning","Courses"],["#credits","Credits"],["#account","Account"],...((profile.role === "admin" || profile.role === "owner") ? [["#admin","Admin"]] : [])].map(([href,label])=><a key={href} href={href} className="shrink-0 rounded-full border border-slate-700 bg-slate-950/50 px-3 py-2 font-semibold text-slate-300 hover:border-indigo-300/40 hover:text-white">{label}</a>)}</nav>
       <div className="grid items-start gap-6 lg:grid-cols-2">
         <section id="opportunities" className="glass scroll-mt-24 rounded-2xl p-5 sm:p-7 lg:col-span-2">
-          <p className="text-xs font-bold uppercase tracking-widest text-emerald-300">Opportunities</p><h2 className="mt-1 text-xl font-bold">Global remote roles</h2><p className="my-2 text-xs leading-5 text-slate-400">Staff-managed listings only. Review the employer and application terms independently. Unlocks cost 1 credit; application links are shown after verified server-side deduction.</p>
+          <p className="text-xs font-bold uppercase tracking-widest text-emerald-300">Opportunities</p><h2 className="mt-1 text-xl font-bold">AI-matched opportunities</h2><p className="my-2 text-xs leading-5 text-slate-400">Find current public listings using your target role, region, relevant skills, and career summary. Web listings can expire or change; verify the details on the source site. Existing verified staff listings remain available below.</p>
+          <div className="my-4 grid gap-3 rounded-xl border border-emerald-300/20 bg-emerald-300/5 p-4 sm:grid-cols-[1fr_auto] sm:items-center"><label className="flex items-start gap-2 text-xs leading-5 text-slate-300"><input type="checkbox" checked={jobSearchConsent} onChange={(event)=>setJobSearchConsent(event.target.checked)} className="mt-1 accent-emerald-400"/>I agree that CareerBoost may send my target role and location, skills, languages, career summary, recent experience, and any saved target roles, evidence gaps, and certifications to Google Gemini with Google Search to find public opportunities. Search is subject to provider billing and retention policies. Private chats are not accessed.</label><button type="button" disabled={busy || !jobSearchConsent} onClick={()=>findRecommendations("jobs")} className="rounded-lg bg-emerald-600 px-4 py-2.5 text-xs font-bold disabled:opacity-50">{busy ? "Searching…" : "Search public jobs"}</button></div>
+          {curatedJobs.length > 0 && <div className="mb-5 grid gap-3 md:grid-cols-2">{curatedJobs.map((job,index)=><article key={`${job.url}-${index}`} className="glass-card rounded-xl p-4"><span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[10px] font-bold text-emerald-200">AI match · public web</span><h3 className="mt-3 font-bold">{job.title}</h3><p className="mt-1 text-xs text-slate-400">{job.organization}{job.location && ` · ${job.location}`}</p><p className="mt-2 text-xs leading-5 text-slate-300">{job.description}</p><p className="mt-2 text-xs text-cyan-200">Why it may fit: {job.fit}</p><a href={job.url} target="_blank" rel="noopener noreferrer" className="mt-3 inline-block rounded-lg bg-emerald-700 px-3 py-2 text-xs font-bold">Check source listing ↗</a></article>)}</div>}
+          {jobSearchSuggestion && <div className="mb-4 text-xs text-slate-400" aria-label="Google Search suggestions" dangerouslySetInnerHTML={{ __html: jobSearchSuggestion }} />}
           {jobs.length === 0 ? <p className="rounded-xl border border-slate-700 p-4 text-sm text-slate-400">No live listings yet. An administrator must add verified opportunities before they appear here.</p> : <div className="grid gap-3 md:grid-cols-2">{jobs.map((job) => <article key={job.id} className="glass-card rounded-xl p-4"><div className="flex items-start justify-between gap-3"><span className="rounded-full bg-emerald-400/10 px-2.5 py-1 text-[11px] font-bold text-emerald-200">{initialProfile.role === "candidate" && job.unlocked ? `${job.matchScore}% skill match` : initialProfile.role === "candidate" ? "Skill match after unlock" : "Staff view"}</span>{job.active === false && <span className="text-[11px] text-slate-500">Archived</span>}</div><h3 className="mt-3 font-bold">{job.title}</h3><p className="mt-1 text-xs text-slate-400">{job.company} · {job.region}</p>{job.salary_range && <p className="mt-1 text-xs text-slate-300">{job.salary_range}</p>}{job.description && <p className="mt-3 whitespace-pre-line text-xs leading-5 text-slate-300">{job.description}</p>}<div className="mt-3 flex flex-wrap items-center gap-2">{job.unlocked && job.application_url ? <a href={job.application_url} target="_blank" rel="noopener noreferrer" className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold">View application</a> : <button disabled={busy || balance < 1} onClick={() => unlockJob(job.id)} className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold disabled:opacity-40">Unlock employer · 1 credit</button>}{(initialProfile.role === "admin" || initialProfile.role === "owner") && job.active !== false && <button disabled={busy} onClick={() => archiveJob(job.id)} className="rounded-lg border border-red-400/30 px-3 py-2 text-xs text-red-200">Archive</button>}</div></article>)}</div>}
         </section>
 
@@ -268,7 +328,11 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
           <form onSubmit={saveProfile} className="grid gap-3 sm:grid-cols-2">
             {[["full_name","Full name"],["linkedin_url","LinkedIn profile URL"],["target_role","Target role"],["target_region","Target region"],["target_salary","Salary target (optional)"],["nationality","Work authorization / location"],["languages","Languages"],["skills","Skills (comma separated)"]].map(([key,label]) => <label key={key} className="space-y-1.5 text-xs text-slate-300">{label}<input name={key} defaultValue={String(profile[key as keyof Profile] || "")} maxLength={key === "skills" ? 1600 : 500} className="field" /></label>)}
             <label className="space-y-1.5 text-xs text-slate-300 sm:col-span-2">Experience summary<textarea name="resume_bio" defaultValue={profile.resume_bio} maxLength={4000} rows={5} className="field resize-y" /></label>
-            <div className="space-y-2 rounded-xl border border-slate-700/70 bg-slate-950/35 p-3 sm:col-span-2"><p className="text-xs font-semibold text-slate-200">Import your LinkedIn profile</p><p className="text-xs leading-5 text-slate-400">Use LinkedIn’s easier Save to PDF option, then select that PDF here. It is read locally in your browser and is not uploaded; direct contact details are removed before import. You can also select career CSV files from a LinkedIn data archive. Review imported fields before saving.</p><input type="file" accept=".pdf,application/pdf,.csv,text/csv" multiple onChange={importLinkedInFiles} className="block w-full text-xs text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-white"/><p className="pt-2 text-xs font-semibold text-slate-200">Or paste profile text</p><p className="text-xs leading-5 text-slate-400">CareerBoost does not sign in to LinkedIn or scrape it. Remove sensitive details you do not want to save.</p><textarea ref={linkedinImportRef} maxLength={4000} rows={3} className="field resize-y" placeholder="Paste your About section or experience text here…"/><button type="button" onClick={importLinkedInText} className="rounded-lg border border-indigo-300/30 px-3 py-2 text-xs font-semibold text-indigo-100 hover:bg-indigo-400/10">Add text to experience summary</button></div>
+            <div className="space-y-2 rounded-xl border border-slate-700/70 bg-slate-950/35 p-3 sm:col-span-2"><p className="text-xs font-semibold text-slate-200">Build your vault from a CV or LinkedIn profile</p><p className="text-xs leading-5 text-slate-400">Select a text-based CV/LinkedIn PDF, Word DOCX, or supported LinkedIn career CSV files. Files are read in your browser and are not uploaded. Email addresses, phone numbers, and URLs are removed. With your explicit consent, the extracted career text and existing saved career profile are sent to Gemini to organize and reconcile work history, education, certifications, skills, and evidence gaps. Review suggestions before saving; details are not saved automatically.</p><input type="file" accept=".pdf,application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.csv,text/csv" multiple onChange={importLinkedInFiles} className="block w-full text-xs text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-white"/>
+              {pendingImportText && <div className="space-y-3 rounded-lg border border-indigo-300/20 bg-indigo-300/5 p-3"><p className="text-xs text-indigo-100">Document text ready ({pendingImportText.length.toLocaleString()} characters); not yet sent.</p><label className="flex items-start gap-2 text-xs leading-5 text-slate-300"><input type="checkbox" checked={profileImportConsent} onChange={(event) => setProfileImportConsent(event.target.checked)} className="mt-1 accent-indigo-400"/>I agree to send the extracted, contact-filtered career text and my existing saved career profile to Google Gemini for structuring and reconciliation. Gemini output may be wrong; I will review it. CareerBoost stores suggestions only after I accept and save the profile.</label><button type="button" disabled={busy || !profileImportConsent} onClick={structureImportedProfile} className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold disabled:opacity-50">{busy ? "Structuring…" : "Structure my profile with AI"}</button></div>}
+              {importSuggestion && <div className="space-y-3 rounded-lg border border-emerald-300/25 bg-emerald-300/5 p-3"><h3 className="text-sm font-bold text-emerald-100">Review extracted profile</h3>{importSuggestion.fullName && <p className="text-xs text-slate-200">Name: {importSuggestion.fullName}</p>}<p className="text-xs text-slate-200">{importSuggestion.headline || importSuggestion.summary || "Career facts extracted"}</p>{importSuggestion.experiences.map((item,index)=><p key={`exp-${index}`} className="text-xs text-slate-300"><strong>{item.title}</strong>{item.organization && ` · ${item.organization}`} {[item.startDate,item.endDate].filter(Boolean).join("–")}<br/>{item.description}</p>)}{importSuggestion.education.map((item,index)=><p key={`edu-${index}`} className="text-xs text-slate-300">{item.qualification} {item.fieldOfStudy && `· ${item.fieldOfStudy}`} · {item.institution}</p>)}{importSuggestion.certifications.map((item,index)=><p key={`cert-${index}`} className="text-xs text-slate-300">Certification: {item.name} · {item.issuer} {item.date}</p>)}{importSuggestion.achievements.length>0&&<p className="text-xs text-slate-300">Achievements: {importSuggestion.achievements.join("; ")}</p>}<p className="text-xs text-slate-300">Skills: {importSuggestion.skills.join(", ") || "None identified"}</p>{importSuggestion.languages.length>0&&<p className="text-xs text-slate-300">Languages: {importSuggestion.languages.join(", ")}</p>}{importSuggestion.targetRoles.length>0&&<p className="text-xs text-slate-300">Possible target roles: {importSuggestion.targetRoles.join(", ")}</p>}{importSuggestion.evidenceGaps.length>0 && <p className="text-xs text-amber-200">Please check: {importSuggestion.evidenceGaps.join("; ")}</p>}{importSuggestion.reviewNotes.length>0 && <p className="text-xs text-amber-200">Conflicts / review notes: {importSuggestion.reviewNotes.join("; ")}</p>}<div className="flex gap-2"><button type="button" onClick={acceptProfileSuggestion} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold">Accept suggestions</button><button type="button" onClick={()=>setImportSuggestion(null)} className="rounded-lg border border-slate-600 px-3 py-2 text-xs">Discard</button></div></div>}
+              {careerData.experiences.length + careerData.education.length + careerData.certifications.length + careerData.skills.length > 0 && <details className="rounded-lg border border-slate-700 p-3"><summary className="cursor-pointer text-xs font-semibold text-cyan-100">Structured vault · {careerData.experiences.length} roles · {careerData.education.length} education · {careerData.certifications.length} credentials</summary><div className="mt-3 space-y-2 text-xs text-slate-300">{careerData.summary&&<p>{careerData.summary}</p>}{careerData.experiences.map((item,index)=><p key={`saved-exp-${index}`}><strong>{item.title}</strong> · {item.organization} · {[item.startDate,item.endDate].filter(Boolean).join("–")}<br/>{item.description}</p>)}{careerData.education.map((item,index)=><p key={`saved-edu-${index}`}>{item.qualification} · {item.institution} · {item.fieldOfStudy}</p>)}{careerData.certifications.map((item,index)=><p key={`saved-cert-${index}`}>{item.name} · {item.issuer} · {item.date}</p>)}{careerData.achievements.map((item,index)=><p key={`saved-ach-${index}`}>{item}</p>)}{careerData.skills.length>0&&<p><strong>Extracted skills:</strong> {careerData.skills.join(", ")}</p>}{careerData.languages.length>0&&<p><strong>Languages:</strong> {careerData.languages.join(", ")}</p>}{careerData.evidenceGaps.length>0&&<p className="text-amber-200"><strong>Verify:</strong> {careerData.evidenceGaps.join("; ")}</p>}{careerData.reviewNotes.length>0&&<p className="text-amber-200"><strong>Review notes:</strong> {careerData.reviewNotes.join("; ")}</p>}</div></details>}
+              <p className="pt-2 text-xs font-semibold text-slate-200">Or paste profile text</p><p className="text-xs leading-5 text-slate-400">CareerBoost does not sign in to LinkedIn or scrape it. Remove sensitive details you do not want to save.</p><textarea ref={linkedinImportRef} maxLength={4000} rows={3} className="field resize-y" placeholder="Paste your About section or experience text here…"/><button type="button" onClick={importLinkedInText} className="rounded-lg border border-indigo-300/30 px-3 py-2 text-xs font-semibold text-indigo-100 hover:bg-indigo-400/10">Add text to experience summary</button></div>
             <button disabled={busy} className="gradient-bg mt-1 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-50 sm:col-span-2">Save profile</button>
           </form>
           <div className="mt-5 flex flex-wrap gap-3 text-xs"><a className="rounded-lg border border-slate-600 px-3 py-2 hover:bg-slate-800" href="/api/account/export">Download my data</a><a className="rounded-lg border border-slate-600 px-3 py-2 hover:bg-slate-800" href="/privacy">Privacy & data handling</a></div>
@@ -313,6 +377,8 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
 
         <section id="learning" className="glass scroll-mt-24 rounded-2xl p-5 sm:p-7">
           <p className="text-xs font-bold uppercase tracking-widest text-amber-300">Learning library</p><h2 className="mt-1 text-xl font-bold">Short courses</h2><p className="my-2 text-xs text-slate-400">Completion records document quiz completion; they are not accredited certifications or independently verified qualifications.</p>
+          <div className="mb-4 space-y-3 rounded-xl border border-amber-300/20 bg-amber-300/5 p-4"><label className="flex items-start gap-2 text-xs leading-5 text-slate-300"><input type="checkbox" checked={learningSearchConsent} onChange={(event)=>setLearningSearchConsent(event.target.checked)} className="mt-1 accent-amber-400"/>I agree that CareerBoost may send my target role and location, skills, languages, career summary, recent experience, and any saved target roles, evidence gaps, and certifications to Gemini with Google Search to find learning resources. Search may incur provider charges; check course fees and terms before enrolling.</label><button type="button" disabled={busy || !learningSearchConsent} onClick={()=>findRecommendations("learning")} className="rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-50">{busy ? "Searching…" : "Find learning resources for my profile"}</button>{curatedCourses.length>0 && <div className="grid gap-3">{curatedCourses.map((course,index)=><article key={`${course.url}-${index}`} className="glass-card rounded-lg p-3"><h3 className="text-sm font-bold">{course.title}</h3><p className="mt-1 text-xs text-slate-400">{course.organization}</p><p className="mt-2 text-xs leading-5 text-slate-300">{course.description}</p><p className="mt-1 text-xs text-amber-200">For you: {course.fit}</p><a href={course.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-xs text-cyan-200 underline">Check resource ↗</a></article>)}</div>}</div>
+          {learningSearchSuggestion && <div className="mb-3 text-xs text-slate-400" aria-label="Google Search suggestions" dangerouslySetInnerHTML={{ __html: learningSearchSuggestion }} />}
           <div className="space-y-4">{courses.map((course) => { const completion = completions.find((item) => item.course_id === course.id); const complete = !!completion; return <article key={course.id} className="glass-card rounded-xl p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><span className="text-[11px] font-bold uppercase tracking-wide text-amber-300">{course.category} · {course.duration_minutes} min</span><h3 className="mt-1 font-bold">{course.title}</h3><p className="mt-1 text-xs leading-5 text-slate-400">{course.description}</p></div>{complete && <span className="text-xs font-bold text-emerald-300">Complete</span>}</div><details className="mt-3"><summary className="cursor-pointer text-xs font-semibold text-indigo-200">Read lesson and quiz</summary><p className="my-3 whitespace-pre-line text-xs leading-5 text-slate-200">{course.lesson}</p>{!complete && <div className="space-y-2"><p className="text-xs font-bold">{course.quiz_question}</p>{course.quiz_options.map((option, index) => <label key={index} className="flex gap-2 text-xs leading-5 text-slate-300"><input type="radio" name={`quiz-${course.id}`} checked={courseAnswer[course.id] === String(index)} onChange={() => setCourseAnswer((old) => ({ ...old, [course.id]: String(index) }))} />{option}</label>)}<button disabled={busy} onClick={() => completeCourse(course.id)} className="rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-50">Submit quiz · 1 credit</button></div>}</details>{complete && <div className="mt-3 flex flex-wrap items-center justify-between gap-2"><p className="break-all font-mono text-[10px] text-slate-500">Record {completion.certificate_code}</p><Link href={`/verify/${completion.certificate_code}`} className="text-xs font-semibold text-indigo-200 underline underline-offset-4">View shareable verification</Link></div>}</article>; })}</div>
         </section>
 

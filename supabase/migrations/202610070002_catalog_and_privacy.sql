@@ -26,7 +26,7 @@ create table public.course_completions (
   user_id uuid not null references auth.users (id) on delete set null,
   course_id text not null references public.courses (id),
   completed_at timestamptz not null default now(),
-  certificate_code text not null unique default encode(gen_random_bytes(12), 'hex'),
+  certificate_code text not null unique default encode(extensions.gen_random_bytes(12), 'hex'),
   unique (user_id, course_id)
 );
 alter table public.course_completions enable row level security;

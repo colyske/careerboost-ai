@@ -27,11 +27,12 @@ function buildPrompt(tool: keyof typeof toolActions, profile: Record<string, unk
     `Skills: ${safeText(profile.skills, 1600)}`,
     `Experience summary: ${safeText(profile.resume_bio, 4000)}`,
     `Languages: ${safeText(profile.languages, 300)}`,
+    `Verified candidate vault details (JSON; use only supported facts): ${safeText(JSON.stringify(profile.career_data || {}), 12000)}`,
   ].join("\n");
 
   const prompts = {
     roadmap: "Create a realistic 90-day career development roadmap. Separate current evidence, skills to develop, weekly actions, and measurable outcomes. Do not promise salary or employment; mark inferences clearly.",
-    cv: "Rewrite the candidate information as an ATS-readable resume draft with a concise summary, skills, and experience bullets. Never invent employers, dates, degrees, metrics, or certifications; use [add details] where evidence is missing.",
+    cv: "Rewrite all provided candidate-vault information as an ATS-readable resume draft with a concise summary, skills, and detailed experience, education, certifications, and achievements sections where evidence exists. Never invent employers, dates, degrees, metrics, or certifications; use [add details] where evidence is missing. Include contact information only when supplied directly for this purpose (it is not stored in the career-data field).",
     linkedin: "Write three concise LinkedIn headline options and one About section. Use only supplied facts and avoid unsupported claims, contact details, or guarantees.",
     interview: "Give practical interview coaching for this answer. Score Situation, Task, Action, and Result from 0 to 5, cite evidence from the answer, and give two specific improvements. Be constructive; do not infer protected traits.",
   };

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasValidOrigin } from "@/lib/request-security";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { normalizeCareerProfileData } from "@/lib/candidate-profile";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +26,7 @@ export async function PATCH(request: Request) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return NextResponse.json({ error: "Invalid profile." }, { status: 400 });
 
   const allowed = ["full_name", "linkedin_url", "target_role", "target_region", "target_salary", "languages", "nationality", "skills", "resume_bio"] as const;
-  const update: Record<string, string> = {};
+  const update: Record<string, unknown> = {};
   for (const field of allowed) {
     const value = (body as Record<string, unknown>)[field];
     if (value !== undefined) {
@@ -35,8 +36,15 @@ export async function PATCH(request: Request) {
       update[field] = value.trim();
     }
   }
+  if ((body as Record<string, unknown>).career_data !== undefined) {
+    const careerData = (body as Record<string, unknown>).career_data;
+    if (!careerData || typeof careerData !== "object" || Array.isArray(careerData) || JSON.stringify(careerData).length > 50000) {
+      return NextResponse.json({ error: "Invalid structured career profile." }, { status: 400 });
+    }
+    update.career_data = normalizeCareerProfileData(careerData);
+  }
   if (Object.keys(update).length === 0) return NextResponse.json({ error: "No profile fields supplied." }, { status: 400 });
-  if (update.linkedin_url && !/^https:\/\/(www\.)?linkedin\.com\//i.test(update.linkedin_url)) {
+  if (typeof update.linkedin_url === "string" && update.linkedin_url && !/^https:\/\/(www\.)?linkedin\.com\//i.test(update.linkedin_url)) {
     return NextResponse.json({ error: "Enter a valid HTTPS LinkedIn profile URL." }, { status: 400 });
   }
 

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { hasValidOrigin } from "@/lib/request-security";
+import { candidateSkillSet, matchScore } from "@/lib/candidate-matching";
 
 export const dynamic = "force-dynamic";
 
@@ -15,15 +16,13 @@ export async function GET() {
   const supabase = await createSupabaseServerClient();
   const { data: auth, error: authError } = await supabase.auth.getUser();
   if (authError || !auth.user) return NextResponse.json({ error: "Sign in required." }, { status: 401 });
-  const { data: profile, error: profileError } = await supabase.from("profiles").select("skills").eq("id", auth.user.id).single();
+  const { data: profile, error: profileError } = await supabase.from("profiles").select("skills,career_data").eq("id", auth.user.id).single();
   if (profileError) return NextResponse.json({ error: "Candidate profile is not available." }, { status: 503 });
   const { data: jobs, error } = await createSupabaseAdminClient().rpc("list_available_jobs", { p_user_id: auth.user.id });
   if (error) return NextResponse.json({ error: "Opportunity feed is not available." }, { status: 503 });
-  const candidateSkills = new Set(String(profile.skills || "").split(",").map((skill) => skill.trim().toLowerCase()).filter(Boolean));
+  const candidateSkills = candidateSkillSet(profile.skills, profile.career_data);
   const ranked = ((jobs ?? []) as JobRow[]).map((job) => {
-    const required = (job.required_skills as string[] || []).map((skill) => skill.toLowerCase());
-    const matched = required.filter((skill) => candidateSkills.has(skill)).length;
-    return { ...job, matchScore: required.length ? Math.round(matched / required.length * 100) : 0 };
+    return { ...job, matchScore: matchScore(job.required_skills || [], candidateSkills) };
   }).sort((a, b) => b.matchScore - a.matchScore);
   return NextResponse.json({ jobs: ranked }, { headers: { "Cache-Control": "private, no-store" } });
 }

@@ -1,8 +1,9 @@
 begin;
-select plan(21);
+select plan(22);
 
 select has_table('public', 'profiles', 'candidate profiles table exists');
 select has_table('public', 'credit_ledger', 'immutable credit ledger exists');
+select has_column('public', 'profiles', 'career_data', 'candidate vault can store structured career details');
 select has_table('public', 'payment_orders', 'payment order table exists');
 select has_table('public', 'course_answers', 'course answer key table exists');
 

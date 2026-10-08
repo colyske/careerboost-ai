@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { normalizeUsWageLocation, parseWageAmount } from "@/lib/salary-insights";
+import { sanitizeSearchEntryPoint } from "@/lib/search-html";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 45;
@@ -45,7 +46,7 @@ async function curatedSearch(role: string, location: string) {
     catch { return []; }
   }).filter((source, index, all) => all.findIndex((item) => item.url === source.url) === index).slice(0, 6);
   if (!summary || !sources.length || !searchSuggestion || searchSuggestion.length > 50000) return null;
-  return { title: role, location, dataYear: "Current web research", summary: summary.slice(0, 5000), sources, searchSuggestion, method: "grounded_search" as const };
+  return { title: role, location, dataYear: "Current web research", summary: summary.slice(0, 5000), sources, searchSuggestion: sanitizeSearchEntryPoint(searchSuggestion), method: "grounded_search" as const };
 }
 
 async function tryCuratedSearch(role: string, location: string) {
