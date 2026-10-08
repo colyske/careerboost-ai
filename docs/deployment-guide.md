@@ -74,7 +74,7 @@ The `.env.local`, `node_modules`, and `.vercel` folders are excluded from Git. D
    ```
 
    Replace the examples with your actual domains in the matching project. Set the password policy to at least 12 characters.
-6. Create the owner account by signing up on the staging site after its first deployment and verifying the email. Set that account's `profiles.role` to `owner` once in the Supabase SQL editor, using the reviewed query in the [production runbook](production-runbook.md). Then sign in, open **Security / MFA**, and enroll an authenticator. Repeat carefully for production.
+6. Create the SuperAdmin account by signing up with `colyske@gmail.com` and verifying the email. The database migrations assign and protect the primary SuperAdmin role automatically; do not run a manual role update. All SuperAdmins can manage candidate, admin, and other SuperAdmin roles. Sign in, open **Security / MFA**, and enroll an authenticator. Repeat for production.
 
 ## 5. Set up Vercel and application settings
 
@@ -95,9 +95,24 @@ For each Vercel project, open **Settings → Environment Variables** and add the
 | `PAYSTACK_EXECUTIVE_AMOUNT_SUBUNITS` | Approved Executive price as an integer in Paystack subunits |
 | `GEMINI_API_KEY` | Optional: a restricted Google AI API key; leave unset to disable AI generation |
 | `GEMINI_MODEL` | A model enabled for your Google account |
+| `NEXT_PUBLIC_GOOGLE_AUTH_ENABLED` | `true` only after Google OAuth is configured in Supabase; otherwise `false` |
+| `CAREERONESTOP_USER_ID` | Optional CareerOneStop account ID for U.S. wage insights |
+| `CAREERONESTOP_API_TOKEN` | Optional CareerOneStop token; server-only secret |
 | `CRON_SECRET` | A long random secret, unique per environment |
 
 Add these to the matching **Preview** or **Production** environment in Vercel. Do not add secrets to names beginning `NEXT_PUBLIC_`; those values are visible in the browser. Vercel must rebuild after environment variables change.
+
+### Google sign-in setup
+
+In Google Cloud, create a Web OAuth client. In Supabase **Authentication → Providers → Google**, enable the provider and enter that client ID and secret. Add the Supabase callback URL shown on that provider page to Google's authorized redirect URIs. In Supabase **Authentication → URL Configuration**, add each app origin and `/auth/callback` to the allowed redirect URLs. Add `NEXT_PUBLIC_GOOGLE_AUTH_ENABLED=true` to the matching Vercel environment and redeploy. The login button remains hidden while this switch is false.
+
+### U.S. wage insight setup
+
+CareerBoost labels these as general salary estimates. When configured, U.S. city/state, state, ZIP, or national searches first use CareerOneStop published wage percentiles. Add `CAREERONESTOP_USER_ID` and `CAREERONESTOP_API_TOKEN` as server-only Vercel variables. If no official U.S. match exists, or the member enters a location outside the U.S., they can opt into Google Search grounding through the configured Gemini API. That fallback returns a general written estimate with source links, not fabricated percentiles. The screen explains that enabling this sends only the job title and location to Gemini/Google and Google may retain the prompt and result for 30 days for Search grounding. Without consent, no AI web search occurs. The feature rate-limits salary requests per account. Google Search grounding through the Gemini API requires a project with billing enabled; confirm current Google API terms and pricing before enabling this feature.
+
+### LinkedIn profile data
+
+On LinkedIn desktop, members can click **Me → View profile → More or Resources → Save to PDF**, then upload that PDF in CareerBoost. See [LinkedIn's current Save a profile as a PDF instructions](https://www.linkedin.com/help/linkedin/answer/a541960/). LinkedIn may limit this feature to English-language profiles and it is not available in the mobile app. CareerBoost extracts text locally in the browser; the PDF itself is not uploaded. Direct contact details and links are filtered, and the member reviews imported content before saving. Career-related CSV exports from a LinkedIn data archive are also supported. Full automatic employment-history sync is not enabled: richer LinkedIn profile access requires approval. Do not request a member password or scrape LinkedIn pages.
 
 ## 6. Configure the GitHub deployment gate
 

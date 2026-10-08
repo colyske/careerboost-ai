@@ -12,6 +12,23 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" | "reset" }) {
   const [mfaCode, setMfaCode] = useState("");
   const isSignUp = mode === "sign-up";
   const isReset = mode === "reset";
+  const googleEnabled = process.env.NEXT_PUBLIC_GOOGLE_AUTH_ENABLED === "true";
+
+  async function signInWithGoogle() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: `${window.location.origin}/auth/callback` },
+      });
+      if (error) throw error;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Google sign-in could not be started.");
+      setBusy(false);
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -77,6 +94,7 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" | "reset" }) {
       <button disabled={busy} className="gradient-bg w-full rounded-xl px-4 py-3 font-bold text-white shadow-lg disabled:cursor-wait disabled:opacity-60">
         {busy ? "Please wait…" : mfaChallenge ? "Verify code" : isSignUp ? "Create account" : isReset ? "Send reset link" : "Sign in"}
       </button>
+      {!isReset && !mfaChallenge && googleEnabled && <><div className="flex items-center gap-3 py-1 text-xs text-slate-500"><span className="h-px flex-1 bg-slate-700"/><span>or continue with</span><span className="h-px flex-1 bg-slate-700"/></div><button type="button" disabled={busy} onClick={signInWithGoogle} className="w-full rounded-xl border border-slate-600 bg-slate-950/50 px-4 py-3 text-sm font-semibold text-slate-100 hover:bg-slate-800 disabled:opacity-50">Continue with Google</button></>}
     </form>
   );
 }

@@ -2,15 +2,27 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { CreditEntry, CreditPackage, Profile } from "@/lib/database.types";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { extractLinkedInPdfText, parseLinkedInExports } from "@/lib/linkedin-export";
 
 type Tool = "roadmap" | "cv" | "linkedin" | "interview";
 type Course = { id: string; title: string; category: string; duration_minutes: number; description: string; lesson: string; quiz_question: string; quiz_options: string[] };
 type Completion = { id: string; course_id: string; completed_at: string; certificate_code: string };
+type SalaryInsight = { title: string; location: string; method: "official_wages" | "grounded_search"; low?: number; median?: number; high?: number; rateType?: string; dataYear: string; source?: string; sourceUrl?: string; summary?: string; sources?: Array<{ url: string; title: string }>; searchSuggestion?: string };
 type AdminUser = { id: string; email: string; full_name: string; role: "candidate" | "admin" | "owner"; credits: number };
 type Opportunity = { id: string; title: string; company: string; region: string; salary_range: string; description: string; required_skills: string[]; application_url: string | null; unlocked: boolean; matchScore: number; active?: boolean };
+type SpeechRecognitionLike = {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  onresult: ((event: { resultIndex: number; results: ArrayLike<ArrayLike<{ transcript: string; isFinal?: boolean }>> }) => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onend: (() => void) | null;
+  start(): void;
+  stop(): void;
+};
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, headers: { ...(init?.body ? { "Content-Type": "application/json" } : {}), ...init?.headers }, cache: "no-store" });
@@ -30,6 +42,8 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
   const [toolOutput, setToolOutput] = useState("");
   const [answer, setAnswer] = useState("");
   const [aiConsent, setAiConsent] = useState(false);
+  const [voiceConsent, setVoiceConsent] = useState(false);
+  const [listening, setListening] = useState(false);
   const [packages, setPackages] = useState<CreditPackage[]>([]);
   const [courses, setCourses] = useState<Course[]>([]);
   const [completions, setCompletions] = useState<Completion[]>([]);
@@ -37,6 +51,11 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [creditAdjustments, setCreditAdjustments] = useState<Record<string, string>>({});
   const [jobs, setJobs] = useState<Opportunity[]>([]);
+  const [salaryInsight, setSalaryInsight] = useState<SalaryInsight | null>(null);
+  const [salaryMessage, setSalaryMessage] = useState("");
+  const [salarySearchConsent, setSalarySearchConsent] = useState(false);
+  const linkedinImportRef = useRef<HTMLTextAreaElement>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   useEffect(() => {
     api<{ packages: CreditPackage[] }>("/api/payments/packages").then((result) => setPackages(result.packages)).catch(() => undefined);
@@ -48,6 +67,8 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
       .catch(() => undefined);
     if (initialProfile.role === "admin" || initialProfile.role === "owner") api<{ users: AdminUser[] }>("/api/admin/users").then((result) => setAdminUsers(result.users)).catch(() => undefined);
   }, [initialProfile.role]);
+
+  useEffect(() => () => recognitionRef.current?.stop(), []);
 
   function tell(text: string) { setMessage(text); }
 
@@ -69,6 +90,60 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
       setToolOutput(result.output); setBalance((current) => current - result.creditsUsed); tell(`Done. ${result.creditsUsed} credit${result.creditsUsed === 1 ? "" : "s"} used.`);
     } catch (error) { tell(error instanceof Error ? error.message : "Generation failed."); }
     finally { setBusy(false); }
+  }
+
+  function importLinkedInText() {
+    const text = linkedinImportRef.current?.value.trim();
+    if (!text) { tell("Paste some profile text first."); return; }
+    const summary = document.querySelector<HTMLTextAreaElement>('[name="resume_bio"]');
+    if (!summary) return;
+    const current = summary.value.trim();
+    summary.value = current ? `${current}\n\n${text}`.slice(0, 4000) : text.slice(0, 4000);
+    tell("Profile text added to your experience summary. Review it, remove anything sensitive, then save your profile.");
+  }
+
+  async function importLinkedInFiles(event: FormEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const files = Array.from(input.files || []);
+    input.value = "";
+    if (!files.length) return;
+    if (files.length > 10 || files.some((file) => (!file.name.toLowerCase().endsWith(".csv") && !file.name.toLowerCase().endsWith(".pdf")) || file.size > 15_000_000)) {
+      tell("Choose a LinkedIn profile PDF or up to 10 CSV files, each no larger than 15 MB."); return;
+    }
+    try {
+      const pdfs = files.filter((file) => file.name.toLowerCase().endsWith(".pdf"));
+      if (pdfs.length > 1 || (pdfs.length && files.length > 1)) { tell("Choose one LinkedIn PDF at a time, or select multiple career CSV files."); return; }
+      const result = pdfs.length
+        ? { summary: await extractLinkedInPdfText(await pdfs[0].arrayBuffer()), skills: [], importedFiles: ["LinkedIn profile PDF"] }
+        : parseLinkedInExports(await Promise.all(files.map(async (file) => ({ name: file.name, text: await file.text() }))));
+      if (!result.importedFiles.length || !result.summary && !result.skills.length) { tell("No readable career profile data was found. Select LinkedIn's Save to PDF profile or supported career CSV files."); return; }
+      const summary = document.querySelector<HTMLTextAreaElement>('[name="resume_bio"]');
+      if (summary && result.summary) summary.value = [summary.value.trim(), result.summary].filter(Boolean).join("\n\n").slice(0, 4000);
+      const skills = document.querySelector<HTMLInputElement>('[name="skills"]');
+      if (skills && result.skills.length) skills.value = Array.from(new Set([...skills.value.split(",").map((value) => value.trim()).filter(Boolean), ...result.skills])).join(", ").slice(0, 1600);
+      tell(`Imported ${result.importedFiles.join(", ")} locally. Review the fields, remove anything you do not want to save, then save your profile.`);
+    } catch { tell("Those CSV files could not be read. Please try extracting the LinkedIn archive again."); }
+  }
+
+  function toggleVoiceCapture() {
+    if (listening) { recognitionRef.current?.stop(); return; }
+    if (!voiceConsent) { tell("Please review the browser voice-processing notice before recording."); return; }
+    const speechWindow = window as Window & { SpeechRecognition?: new () => SpeechRecognitionLike; webkitSpeechRecognition?: new () => SpeechRecognitionLike };
+    const Recognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+    if (!Recognition) { tell("Voice capture is not available in this browser. You can still type your answer below."); return; }
+    const recognition = new Recognition();
+    recognition.lang = navigator.language || "en-US";
+    recognition.interimResults = true;
+    recognition.continuous = true;
+    recognition.onresult = (event) => {
+      const captured = Array.from({ length: event.results.length }, (_, index) => event.results[index][0]?.transcript || "").join(" ").trim();
+      setAnswer(captured.slice(0, 5000));
+    };
+    recognition.onerror = (event) => { setListening(false); tell(`Voice capture stopped (${event.error}). You can continue by typing.`); };
+    recognition.onend = () => setListening(false);
+    recognitionRef.current = recognition;
+    try { recognition.start(); setListening(true); tell("Listening. Speak your interview example, then stop recording to review the transcript."); }
+    catch { setListening(false); tell("Could not start voice capture. You can continue by typing."); }
   }
 
   async function startPayment(bundle: string) {
@@ -116,7 +191,7 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
     finally { setBusy(false); }
   }
 
-  async function changeRole(targetUserId: string, role: "candidate" | "admin") {
+  async function changeRole(targetUserId: string, role: "candidate" | "admin" | "owner") {
     setBusy(true);
     try { await api("/api/admin/users", { method: "POST", body: JSON.stringify({ targetUserId, role }) }); const result = await api<{ users: AdminUser[] }>("/api/admin/users"); setAdminUsers(result.users); tell("Role change recorded in the audit log."); }
     catch (error) { tell(error instanceof Error ? error.message : "Role change failed."); }
@@ -126,6 +201,20 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
   async function refreshJobs() {
     const result = await api<{ jobs: Opportunity[] }>("/api/jobs");
     setJobs(result.jobs);
+  }
+
+  async function loadSalaryInsight() {
+    if (!profile.target_role.trim() || !profile.target_region.trim()) {
+      setSalaryMessage("Save a target job title and a U.S. location first (city, state; state abbreviation; or ZIP code).");
+      return;
+    }
+    setBusy(true); setSalaryMessage(""); setSalaryInsight(null);
+    try {
+      const params = new URLSearchParams({ role: profile.target_role, location: profile.target_region, searchConsent: String(salarySearchConsent) });
+      const result = await api<SalaryInsight>(`/api/salary?${params.toString()}`);
+      setSalaryInsight(result);
+    } catch (error) { setSalaryMessage(error instanceof Error ? error.message : "Salary insight could not be loaded."); }
+    finally { setBusy(false); }
   }
 
   async function unlockJob(jobId: string) {
@@ -154,39 +243,67 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
 
   const titleByTool: Record<Tool, string> = { roadmap: "Career roadmap", cv: "ATS resume draft", linkedin: "LinkedIn profile rewrite", interview: "STAR interview coaching" };
   const costByTool: Record<Tool, number> = { roadmap: 1, cv: 1, linkedin: 1, interview: 2 };
+  const isPrimarySuperAdmin = email.trim().toLowerCase() === "colyske@gmail.com";
 
   return (
     <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-8">
       <header className="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-slate-700/70 pb-5">
         <Link href="/" className="text-lg font-black tracking-tight">CareerBoost</Link>
-        <div className="flex flex-wrap items-center gap-3 text-sm"><span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-1.5 font-bold text-amber-200">{balance} credits</span><span className="max-w-48 truncate text-slate-300">{email}</span>{(profile.role === "admin" || profile.role === "owner") && <Link href="/security" className="rounded-lg border border-purple-400/40 px-3 py-2 text-purple-100">Security / MFA</Link>}<button onClick={signOut} className="rounded-lg border border-slate-600 px-3 py-2 text-slate-200 hover:bg-slate-800">Sign out</button></div>
+        <div className="flex flex-wrap items-center gap-3 text-sm"><span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-1.5 font-bold text-amber-200">{balance} credits</span><span className="max-w-48 truncate text-slate-300">{email}</span>{profile.role === "owner" && <span className="rounded-full border border-amber-300/30 bg-amber-300/10 px-2.5 py-1 text-[11px] font-black uppercase tracking-wide text-amber-200">SuperAdmin</span>}{(profile.role === "admin" || profile.role === "owner") && <Link href="/security" className="rounded-lg border border-purple-400/40 px-3 py-2 text-purple-100">Security / MFA</Link>}<button onClick={signOut} className="rounded-lg border border-slate-600 px-3 py-2 text-slate-200 hover:bg-slate-800">Sign out</button></div>
       </header>
       <div className="mb-8 grid gap-5 lg:grid-cols-[1.4fr_.6fr]">
         <section className="glass rounded-3xl p-6 sm:p-9"><p className="mb-3 text-xs font-bold uppercase tracking-[.2em] text-indigo-300">Candidate hub</p><h1 className="text-3xl font-extrabold sm:text-4xl">Build your next career move.</h1><p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">Your profile, balance, and course records are stored server-side. Review AI drafts before using them; generated advice does not guarantee employment.</p></section>
         <section className="glass rounded-3xl p-6"><p className="text-sm text-slate-400">Credit balance</p><p className="mt-1 text-4xl font-black text-amber-300">{balance}</p><p className="mt-1 text-xs text-slate-400">Purchased credits are confirmed by the payment provider before they are added.</p></section>
       </div>
       {message && <p role="status" className="mb-6 rounded-xl border border-indigo-400/25 bg-indigo-400/10 px-4 py-3 text-sm text-indigo-100">{message}</p>}
+      <nav aria-label="Candidate hub sections" className="no-print mb-6 flex gap-2 overflow-x-auto pb-2 text-xs">{[["#candidate-vault","Profile"],["#career-studio","Career tools"],["#opportunities","Opportunities"],["#learning","Courses"],["#credits","Credits"],["#account","Account"],...((profile.role === "admin" || profile.role === "owner") ? [["#admin","Admin"]] : [])].map(([href,label])=><a key={href} href={href} className="shrink-0 rounded-full border border-slate-700 bg-slate-950/50 px-3 py-2 font-semibold text-slate-300 hover:border-indigo-300/40 hover:text-white">{label}</a>)}</nav>
       <div className="grid items-start gap-6 lg:grid-cols-2">
-        <section className="glass rounded-2xl p-5 sm:p-7 lg:col-span-2">
+        <section id="opportunities" className="glass scroll-mt-24 rounded-2xl p-5 sm:p-7 lg:col-span-2">
           <p className="text-xs font-bold uppercase tracking-widest text-emerald-300">Opportunities</p><h2 className="mt-1 text-xl font-bold">Global remote roles</h2><p className="my-2 text-xs leading-5 text-slate-400">Staff-managed listings only. Review the employer and application terms independently. Unlocks cost 1 credit; application links are shown after verified server-side deduction.</p>
           {jobs.length === 0 ? <p className="rounded-xl border border-slate-700 p-4 text-sm text-slate-400">No live listings yet. An administrator must add verified opportunities before they appear here.</p> : <div className="grid gap-3 md:grid-cols-2">{jobs.map((job) => <article key={job.id} className="glass-card rounded-xl p-4"><div className="flex items-start justify-between gap-3"><span className="rounded-full bg-emerald-400/10 px-2.5 py-1 text-[11px] font-bold text-emerald-200">{initialProfile.role === "candidate" && job.unlocked ? `${job.matchScore}% skill match` : initialProfile.role === "candidate" ? "Skill match after unlock" : "Staff view"}</span>{job.active === false && <span className="text-[11px] text-slate-500">Archived</span>}</div><h3 className="mt-3 font-bold">{job.title}</h3><p className="mt-1 text-xs text-slate-400">{job.company} · {job.region}</p>{job.salary_range && <p className="mt-1 text-xs text-slate-300">{job.salary_range}</p>}{job.description && <p className="mt-3 whitespace-pre-line text-xs leading-5 text-slate-300">{job.description}</p>}<div className="mt-3 flex flex-wrap items-center gap-2">{job.unlocked && job.application_url ? <a href={job.application_url} target="_blank" rel="noopener noreferrer" className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold">View application</a> : <button disabled={busy || balance < 1} onClick={() => unlockJob(job.id)} className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold disabled:opacity-40">Unlock employer · 1 credit</button>}{(initialProfile.role === "admin" || initialProfile.role === "owner") && job.active !== false && <button disabled={busy} onClick={() => archiveJob(job.id)} className="rounded-lg border border-red-400/30 px-3 py-2 text-xs text-red-200">Archive</button>}</div></article>)}</div>}
         </section>
 
-        <section className="glass rounded-2xl p-5 sm:p-7">
+        <section id="candidate-vault" className="glass scroll-mt-24 rounded-2xl p-5 sm:p-7">
           <div className="mb-5"><p className="text-xs font-bold uppercase tracking-widest text-cyan-300">Candidate vault</p><h2 className="mt-1 text-xl font-bold">Your profile</h2><p className="mt-2 text-xs text-slate-400">Enter only information you want to use for career drafts. Never add passwords, government ID numbers, or private contact details.</p></div>
           <form onSubmit={saveProfile} className="grid gap-3 sm:grid-cols-2">
             {[["full_name","Full name"],["linkedin_url","LinkedIn profile URL"],["target_role","Target role"],["target_region","Target region"],["target_salary","Salary target (optional)"],["nationality","Work authorization / location"],["languages","Languages"],["skills","Skills (comma separated)"]].map(([key,label]) => <label key={key} className="space-y-1.5 text-xs text-slate-300">{label}<input name={key} defaultValue={String(profile[key as keyof Profile] || "")} maxLength={key === "skills" ? 1600 : 500} className="field" /></label>)}
             <label className="space-y-1.5 text-xs text-slate-300 sm:col-span-2">Experience summary<textarea name="resume_bio" defaultValue={profile.resume_bio} maxLength={4000} rows={5} className="field resize-y" /></label>
+            <div className="space-y-2 rounded-xl border border-slate-700/70 bg-slate-950/35 p-3 sm:col-span-2"><p className="text-xs font-semibold text-slate-200">Import your LinkedIn profile</p><p className="text-xs leading-5 text-slate-400">Use LinkedIn’s easier Save to PDF option, then select that PDF here. It is read locally in your browser and is not uploaded; direct contact details are removed before import. You can also select career CSV files from a LinkedIn data archive. Review imported fields before saving.</p><input type="file" accept=".pdf,application/pdf,.csv,text/csv" multiple onChange={importLinkedInFiles} className="block w-full text-xs text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-700 file:px-3 file:py-2 file:text-xs file:font-semibold file:text-white"/><p className="pt-2 text-xs font-semibold text-slate-200">Or paste profile text</p><p className="text-xs leading-5 text-slate-400">CareerBoost does not sign in to LinkedIn or scrape it. Remove sensitive details you do not want to save.</p><textarea ref={linkedinImportRef} maxLength={4000} rows={3} className="field resize-y" placeholder="Paste your About section or experience text here…"/><button type="button" onClick={importLinkedInText} className="rounded-lg border border-indigo-300/30 px-3 py-2 text-xs font-semibold text-indigo-100 hover:bg-indigo-400/10">Add text to experience summary</button></div>
             <button disabled={busy} className="gradient-bg mt-1 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-50 sm:col-span-2">Save profile</button>
           </form>
           <div className="mt-5 flex flex-wrap gap-3 text-xs"><a className="rounded-lg border border-slate-600 px-3 py-2 hover:bg-slate-800" href="/api/account/export">Download my data</a><a className="rounded-lg border border-slate-600 px-3 py-2 hover:bg-slate-800" href="/privacy">Privacy & data handling</a></div>
         </section>
 
-        <section className="glass rounded-2xl p-5 sm:p-7">
+        <section id="career-studio" className="glass scroll-mt-24 rounded-2xl p-5 sm:p-7">
           <div className="mb-5"><p className="text-xs font-bold uppercase tracking-widest text-indigo-300">Career studio</p><h2 className="mt-1 text-xl font-bold">Tools tailored to your goals</h2><p className="mt-2 text-xs leading-5 text-slate-400">AI output uses your profile fields and is sent to Google Gemini for processing. Do not continue unless you agree and have removed anything too sensitive to share.</p></div>
-          <form onSubmit={runTool} className="space-y-4">
+          <div className="mb-5 rounded-xl border border-cyan-300/20 bg-cyan-300/5 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="font-bold">General salary estimates</h3>
+                <p className="mt-1 text-xs leading-5 text-slate-400">See a broad market estimate for your chosen location. U.S. results use published wage data where available; optional AI web research can find cited estimates for other locations or roles with no official match. Estimates are not personalized salary predictions.</p>
+              </div>
+              <button type="button" disabled={busy} onClick={loadSalaryInsight} className="shrink-0 rounded-lg border border-cyan-300/30 px-3 py-2 text-xs font-semibold text-cyan-100 disabled:opacity-50">Get salary estimate</button>
+            </div>
+            <label className="mt-3 flex items-start gap-2 text-xs leading-5 text-slate-300"><input type="checkbox" checked={salarySearchConsent} onChange={(event) => setSalarySearchConsent(event.target.checked)} className="mt-1 accent-cyan-400"/>I agree that, if published U.S. wage data is unavailable or my location is outside the U.S., CareerBoost may send only my target job title and location to Google Gemini with Google Search to create a general estimate with source links. This requires a billed Gemini API project. Google may retain the query and result for 30 days for Search grounding.</label>
+            {salaryMessage && <p role="status" className="mt-3 text-xs text-amber-200">{salaryMessage}</p>}
+            {salaryInsight && <div className="mt-4 rounded-lg border border-slate-700 bg-slate-950/55 p-4">
+              <p className="text-xs text-slate-400">{salaryInsight.title} · {salaryInsight.location} · {salaryInsight.dataYear} · {salaryInsight.method === "official_wages" ? "Published wage data" : "AI-assisted web research; general estimate"}</p>
+              {salaryInsight.method === "official_wages" && salaryInsight.low !== undefined && salaryInsight.median !== undefined && salaryInsight.high !== undefined ? <>
+                <div className="mt-2 grid grid-cols-3 gap-2 text-center">
+                  <div><p className="text-[10px] uppercase text-slate-500">25th percentile</p><p className="mt-1 text-sm font-bold">{new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(salaryInsight.low)}</p></div>
+                  <div><p className="text-[10px] uppercase text-cyan-300">Median</p><p className="mt-1 text-lg font-black text-cyan-100">{new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(salaryInsight.median)}</p></div>
+                  <div><p className="text-[10px] uppercase text-slate-500">75th percentile</p><p className="mt-1 text-sm font-bold">{new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(salaryInsight.high)}</p></div>
+                </div>
+                <p className="mt-3 text-[10px] leading-4 text-slate-500">{salaryInsight.source} {salaryInsight.sourceUrl && <a className="underline" href={salaryInsight.sourceUrl} target="_blank" rel="noopener noreferrer">Data source</a>}. {salaryInsight.rateType} wages; wages vary by experience and employer.</p>
+              </> : <div>
+                <p className="mt-3 whitespace-pre-line text-sm leading-6 text-slate-200">{salaryInsight.summary}</p>
+                <div className="mt-3 flex flex-wrap gap-2 text-xs">{salaryInsight.sources?.map((source) => <a key={source.url} className="underline text-cyan-200" href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a>)}</div>
+                {salaryInsight.searchSuggestion && <div aria-label="Google Search suggestions" dangerouslySetInnerHTML={{ __html: salaryInsight.searchSuggestion }} />}
+              </div>}
+            </div>}
+          </div>          <form onSubmit={runTool} className="space-y-4">
             <label className="block space-y-1.5 text-xs text-slate-300">Choose a tool<select value={tool} onChange={(event) => { setTool(event.target.value as Tool); setToolOutput(""); }} className="field">{(Object.keys(titleByTool) as Tool[]).map((item) => <option key={item} value={item}>{titleByTool[item]} · {costByTool[item]} credit{costByTool[item] === 1 ? "" : "s"}</option>)}</select></label>
-            {tool === "interview" && <label className="block space-y-1.5 text-xs text-slate-300">Your interview answer<textarea value={answer} onChange={(event) => setAnswer(event.target.value)} rows={5} maxLength={5000} className="field resize-y" placeholder="Describe the situation, your responsibility, the actions you took, and the outcome…" /></label>}
+            {tool === "interview" && <><label className="block space-y-1.5 text-xs text-slate-300">Your interview answer<textarea value={answer} onChange={(event) => setAnswer(event.target.value)} rows={5} maxLength={5000} className="field resize-y" placeholder="Describe the situation, your responsibility, the actions you took, and the outcome…" /></label><label className="flex gap-3 rounded-xl border border-slate-700 bg-slate-950/35 p-3 text-xs leading-5 text-slate-300"><input type="checkbox" checked={voiceConsent} onChange={(event) => setVoiceConsent(event.target.checked)} className="mt-1 size-4 accent-indigo-400"/>I understand voice capture uses my browser’s speech-recognition service, which may process audio outside CareerBoost. I can type instead; only the resulting text is sent to Gemini after I also accept the AI notice.</label><button type="button" onClick={toggleVoiceCapture} disabled={busy} className="rounded-lg border border-indigo-300/30 px-3 py-2 text-xs font-semibold text-indigo-100 disabled:opacity-50">{listening ? "Stop voice capture" : "Start voice capture"}</button></>}
             <label className="flex gap-3 rounded-xl border border-amber-300/25 bg-amber-300/5 p-3 text-xs leading-5 text-amber-100"><input type="checkbox" checked={aiConsent} onChange={(event) => setAiConsent(event.target.checked)} className="mt-1 size-4 accent-indigo-400" />I agree to send the relevant profile details to Google Gemini to generate this result.</label>
             <button disabled={busy || !aiConsent || balance < costByTool[tool]} className="gradient-bg rounded-xl px-4 py-3 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-50">{busy ? "Working…" : `Generate · ${costByTool[tool]} credit${costByTool[tool] === 1 ? "" : "s"}`}</button>
           </form>
@@ -194,19 +311,19 @@ export function Dashboard({ initialProfile, initialBalance, email }: { initialPr
           <div className="mt-4 flex flex-wrap gap-2">{(Object.keys(titleByTool) as Tool[]).map((item) => <button key={item} onClick={() => { setTool(item); setToolOutput(""); }} className={`rounded-full px-3 py-1.5 text-xs ${tool === item ? "bg-indigo-500/30 text-indigo-100" : "bg-slate-800 text-slate-300"}`}>{titleByTool[item]}</button>)}</div>
         </section>
 
-        <section className="glass rounded-2xl p-5 sm:p-7">
+        <section id="learning" className="glass scroll-mt-24 rounded-2xl p-5 sm:p-7">
           <p className="text-xs font-bold uppercase tracking-widest text-amber-300">Learning library</p><h2 className="mt-1 text-xl font-bold">Short courses</h2><p className="my-2 text-xs text-slate-400">Completion records document quiz completion; they are not accredited certifications or independently verified qualifications.</p>
-          <div className="space-y-4">{courses.map((course) => { const complete = completions.some((item) => item.course_id === course.id); return <article key={course.id} className="glass-card rounded-xl p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><span className="text-[11px] font-bold uppercase tracking-wide text-amber-300">{course.category} · {course.duration_minutes} min</span><h3 className="mt-1 font-bold">{course.title}</h3><p className="mt-1 text-xs leading-5 text-slate-400">{course.description}</p></div>{complete && <span className="text-xs font-bold text-emerald-300">Complete</span>}</div><details className="mt-3"><summary className="cursor-pointer text-xs font-semibold text-indigo-200">Read lesson and quiz</summary><p className="my-3 whitespace-pre-line text-xs leading-5 text-slate-200">{course.lesson}</p>{!complete && <div className="space-y-2"><p className="text-xs font-bold">{course.quiz_question}</p>{course.quiz_options.map((option, index) => <label key={index} className="flex gap-2 text-xs leading-5 text-slate-300"><input type="radio" name={`quiz-${course.id}`} checked={courseAnswer[course.id] === String(index)} onChange={() => setCourseAnswer((old) => ({ ...old, [course.id]: String(index) }))} />{option}</label>)}<button disabled={busy} onClick={() => completeCourse(course.id)} className="rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-50">Submit quiz · 1 credit</button></div>}</details>{complete && <p className="mt-3 break-all font-mono text-[10px] text-slate-500">Record {completions.find((item) => item.course_id === course.id)?.certificate_code}</p>}</article>; })}</div>
+          <div className="space-y-4">{courses.map((course) => { const completion = completions.find((item) => item.course_id === course.id); const complete = !!completion; return <article key={course.id} className="glass-card rounded-xl p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><span className="text-[11px] font-bold uppercase tracking-wide text-amber-300">{course.category} · {course.duration_minutes} min</span><h3 className="mt-1 font-bold">{course.title}</h3><p className="mt-1 text-xs leading-5 text-slate-400">{course.description}</p></div>{complete && <span className="text-xs font-bold text-emerald-300">Complete</span>}</div><details className="mt-3"><summary className="cursor-pointer text-xs font-semibold text-indigo-200">Read lesson and quiz</summary><p className="my-3 whitespace-pre-line text-xs leading-5 text-slate-200">{course.lesson}</p>{!complete && <div className="space-y-2"><p className="text-xs font-bold">{course.quiz_question}</p>{course.quiz_options.map((option, index) => <label key={index} className="flex gap-2 text-xs leading-5 text-slate-300"><input type="radio" name={`quiz-${course.id}`} checked={courseAnswer[course.id] === String(index)} onChange={() => setCourseAnswer((old) => ({ ...old, [course.id]: String(index) }))} />{option}</label>)}<button disabled={busy} onClick={() => completeCourse(course.id)} className="rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-50">Submit quiz · 1 credit</button></div>}</details>{complete && <div className="mt-3 flex flex-wrap items-center justify-between gap-2"><p className="break-all font-mono text-[10px] text-slate-500">Record {completion.certificate_code}</p><Link href={`/verify/${completion.certificate_code}`} className="text-xs font-semibold text-indigo-200 underline underline-offset-4">View shareable verification</Link></div>}</article>; })}</div>
         </section>
 
-        <section className="glass rounded-2xl p-5 sm:p-7">
+        <section id="credits" className="glass scroll-mt-24 rounded-2xl p-5 sm:p-7">
           <p className="text-xs font-bold uppercase tracking-widest text-amber-300">Credits & payments</p><h2 className="mt-1 text-xl font-bold">Top up your balance</h2><p className="mt-2 text-xs text-slate-400">Payments use Paystack. Credits appear only after the server verifies the matching amount, currency, reference, and payer with Paystack.</p>
           <div className="mt-4 grid gap-3 sm:grid-cols-3">{packages.map((bundle) => <article key={bundle.id} className="glass-card rounded-xl p-4"><h3 className="font-bold">{bundle.label}</h3><p className="my-1 text-amber-200">{bundle.credits} credits</p><p className="mb-3 text-xs text-slate-400">{bundle.amountSubunits ? new Intl.NumberFormat(undefined, { style: "currency", currency: bundle.currency }).format(bundle.amountSubunits / 100) : "Price not set"}</p><button disabled={busy || !bundle.amountSubunits} onClick={() => startPayment(bundle.id)} className="w-full rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40">{bundle.amountSubunits ? "Continue to Paystack" : "Not configured"}</button></article>)}</div>
           <h3 className="mt-6 font-bold">Recent credit activity</h3><ul className="mt-2 space-y-2">{entries.slice(0, 8).map((entry) => <li key={entry.id} className="flex justify-between gap-3 border-b border-slate-700/60 py-2 text-xs"><span>{entry.reason}</span><span className={entry.amount > 0 ? "text-emerald-300" : "text-slate-300"}>{entry.amount > 0 ? "+" : ""}{entry.amount}</span></li>)}</ul>
         </section>
 
-        <section className="glass rounded-2xl p-5 sm:p-7 lg:col-span-2"><h2 className="text-lg font-bold">Account deletion</h2><p className="mt-1 text-xs leading-5 text-slate-400">Deleting removes the login and profile, unlinks credit history, and redacts order email. Payment references are retained for reconciliation; review local retention requirements before launch.</p><form onSubmit={deleteAccount} className="mt-4 flex flex-wrap gap-3"><input name="confirmEmail" type="email" required placeholder="Re-enter your account email" className="field max-w-sm" /><button disabled={busy} className="rounded-lg border border-red-400/40 px-4 py-2 text-sm text-red-200 hover:bg-red-950/50 disabled:opacity-50">Delete account</button></form></section>
-        {(initialProfile.role === "admin" || initialProfile.role === "owner") && <section className="glass rounded-2xl p-5 sm:p-7 lg:col-span-2"><p className="text-xs font-bold uppercase tracking-widest text-purple-300">Administrator</p><h2 className="mt-1 text-xl font-bold">Account and credit controls</h2><p className="mb-4 mt-2 text-xs text-slate-400">Credit changes are append-only and audited. Only the organization owner can change staff roles.</p><div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left text-xs"><thead className="text-slate-400"><tr><th className="p-2">Account</th><th className="p-2">Role</th><th className="p-2">Balance</th><th className="p-2">Add credits</th></tr></thead><tbody>{adminUsers.map((adminUser) => <tr key={adminUser.id} className="border-t border-slate-700/70"><td className="p-2"><div className="font-semibold">{adminUser.full_name || "Candidate"}</div><div className="text-slate-500">{adminUser.email}</div></td><td className="p-2">{initialProfile.role === "owner" && adminUser.role !== "owner" ? <select value={adminUser.role} disabled={busy || adminUser.id === initialProfile.id} onChange={(event) => changeRole(adminUser.id, event.target.value as "candidate" | "admin")} className="field max-w-32"><option value="candidate">Candidate</option><option value="admin">Admin</option></select> : <span className="capitalize">{adminUser.role}</span>}</td><td className="p-2 font-bold text-amber-200">{adminUser.credits}</td><td className="p-2"><div className="flex gap-2"><input aria-label={`Credit amount for ${adminUser.email}`} type="number" min="1" max="1000" value={creditAdjustments[adminUser.id] || ""} onChange={(event) => setCreditAdjustments((old) => ({ ...old, [adminUser.id]: event.target.value }))} className="field max-w-24"/><button disabled={busy} onClick={() => adjustCredits(adminUser.id)} className="rounded-lg bg-amber-500 px-3 py-2 font-bold text-slate-950 disabled:opacity-50">Add</button></div></td></tr>)}</tbody></table></div><details className="mt-6 rounded-xl border border-slate-700 p-4"><summary className="cursor-pointer font-bold">Publish opportunity</summary><form onSubmit={publishJob} className="mt-4 grid gap-3 sm:grid-cols-2"><label className="space-y-1.5 text-xs">Role title<input name="title" minLength={4} maxLength={180} required className="field"/></label><label className="space-y-1.5 text-xs">Employer<input name="company" minLength={2} maxLength={180} required className="field"/></label><label className="space-y-1.5 text-xs">Region<input name="region" minLength={2} maxLength={180} required className="field"/></label><label className="space-y-1.5 text-xs">Salary / compensation (optional)<input name="salaryRange" maxLength={180} className="field"/></label><label className="space-y-1.5 text-xs sm:col-span-2">Required skills (comma separated)<input name="requiredSkills" maxLength={1200} className="field"/></label><label className="space-y-1.5 text-xs sm:col-span-2">Job description<textarea name="description" minLength={20} maxLength={5000} required rows={4} className="field"/></label><label className="space-y-1.5 text-xs sm:col-span-2">HTTPS application URL<input name="applicationUrl" type="url" pattern="https://.*" required className="field"/></label><button disabled={busy} className="gradient-bg rounded-xl px-4 py-3 text-sm font-bold sm:col-span-2">Publish listing</button></form></details></section>}
+        <section id="account" className="glass scroll-mt-24 rounded-2xl p-5 sm:p-7 lg:col-span-2"><h2 className="text-lg font-bold">Account deletion</h2><p className="mt-1 text-xs leading-5 text-slate-400">Deleting removes the login and profile, unlinks credit history, and redacts order email. Payment references are retained for reconciliation; review local retention requirements before launch.</p>{isPrimarySuperAdmin && profile.role === "owner" ? <p className="mt-4 text-xs text-emerald-200">This primary SuperAdmin account is protected from deletion.</p> : <form onSubmit={deleteAccount} className="mt-4 flex flex-wrap gap-3"><input name="confirmEmail" type="email" required placeholder="Re-enter your account email" className="field max-w-sm" /><button disabled={busy} className="rounded-lg border border-red-400/40 px-4 py-2 text-sm text-red-200 hover:bg-red-950/50 disabled:opacity-50">Delete account</button></form>}</section>
+        {(initialProfile.role === "admin" || initialProfile.role === "owner") && <section id="admin" className="glass scroll-mt-24 rounded-2xl p-5 sm:p-7 lg:col-span-2"><p className="text-xs font-bold uppercase tracking-widest text-purple-300">Administrator</p><h2 className="mt-1 text-xl font-bold">Account and credit controls</h2><p className="mb-4 mt-2 text-xs text-slate-400">Credit changes are append-only and audited. All SuperAdmins can manage user roles and administrator tasks. The primary SuperAdmin account is protected.</p><div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left text-xs"><thead className="text-slate-400"><tr><th className="p-2">Account</th><th className="p-2">Role</th><th className="p-2">Balance</th><th className="p-2">Add credits</th></tr></thead><tbody>{adminUsers.map((adminUser) => <tr key={adminUser.id} className="border-t border-slate-700/70"><td className="p-2"><div className="font-semibold">{adminUser.full_name || "Candidate"}</div><div className="text-slate-500">{adminUser.email}</div></td><td className="p-2">{profile.role === "owner" && adminUser.email.toLowerCase() !== "colyske@gmail.com" ? <select value={adminUser.role} disabled={busy || adminUser.id === initialProfile.id} onChange={(event) => changeRole(adminUser.id, event.target.value as "candidate" | "admin" | "owner")} className="field max-w-32"><option value="candidate">Candidate</option><option value="admin">Admin</option><option value="owner">SuperAdmin</option></select> : <span className="capitalize">{adminUser.role === "owner" ? "SuperAdmin" : adminUser.role}{adminUser.email.toLowerCase() === "colyske@gmail.com" ? " · Protected" : ""}</span>}</td><td className="p-2 font-bold text-amber-200">{adminUser.credits}</td><td className="p-2">{adminUser.email.toLowerCase() === "colyske@gmail.com" ? <span className="text-slate-500">Protected</span> : <div className="flex gap-2"><input aria-label={`Credit amount for ${adminUser.email}`} type="number" min="1" max="1000" value={creditAdjustments[adminUser.id] || ""} onChange={(event) => setCreditAdjustments((old) => ({ ...old, [adminUser.id]: event.target.value }))} className="field max-w-24"/><button disabled={busy} onClick={() => adjustCredits(adminUser.id)} className="rounded-lg bg-amber-500 px-3 py-2 font-bold text-slate-950 disabled:opacity-50">Add</button></div>}</td></tr>)}</tbody></table></div><details className="mt-6 rounded-xl border border-slate-700 p-4"><summary className="cursor-pointer font-bold">Publish opportunity</summary><form onSubmit={publishJob} className="mt-4 grid gap-3 sm:grid-cols-2"><label className="space-y-1.5 text-xs">Role title<input name="title" minLength={4} maxLength={180} required className="field"/></label><label className="space-y-1.5 text-xs">Employer<input name="company" minLength={2} maxLength={180} required className="field"/></label><label className="space-y-1.5 text-xs">Region<input name="region" minLength={2} maxLength={180} required className="field"/></label><label className="space-y-1.5 text-xs">Salary / compensation (optional)<input name="salaryRange" maxLength={180} className="field"/></label><label className="space-y-1.5 text-xs sm:col-span-2">Required skills (comma separated)<input name="requiredSkills" maxLength={1200} className="field"/></label><label className="space-y-1.5 text-xs sm:col-span-2">Job description<textarea name="description" minLength={20} maxLength={5000} required rows={4} className="field"/></label><label className="space-y-1.5 text-xs sm:col-span-2">HTTPS application URL<input name="applicationUrl" type="url" pattern="https://.*" required className="field"/></label><button disabled={busy} className="gradient-bg rounded-xl px-4 py-3 text-sm font-bold sm:col-span-2">Publish listing</button></form></details></section>}
       </div>
       <footer className="mt-10 flex flex-wrap justify-between gap-3 border-t border-slate-700/70 pt-5 text-xs text-slate-500"><span>Career drafts are suggestions. Verify facts and employment terms independently.</span><Link href="/privacy" className="underline">Privacy and retention</Link></footer>
     </main>

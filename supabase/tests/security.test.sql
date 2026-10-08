@@ -1,5 +1,5 @@
 begin;
-select plan(17);
+select plan(21);
 
 select has_table('public', 'profiles', 'candidate profiles table exists');
 select has_table('public', 'credit_ledger', 'immutable credit ledger exists');
@@ -20,6 +20,10 @@ select ok(not has_function_privilege('authenticated', 'public.unlock_job(uuid,uu
 select ok(not has_function_privilege('authenticated', 'public.admin_list_users(uuid,integer,integer)', 'execute'), 'candidate sessions cannot call admin user listing');
 select ok(not has_function_privilege('authenticated', 'public.create_payment_order(uuid,text,text,integer,integer,text,text)', 'execute'), 'candidate sessions cannot create payment orders directly');
 select ok(not has_function_privilege('authenticated', 'public.purge_user_data(uuid)', 'execute'), 'candidate sessions cannot invoke account deletion internals directly');
+select ok(not has_function_privilege('authenticated', 'public.check_salary_rate_limit(uuid)', 'execute'), 'candidate sessions cannot call the salary rate-limit RPC directly');
+select ok(to_regprocedure('public.assign_protected_superadmin()') is not null, 'verified SuperAdmin assignment trigger function exists');
+select ok(to_regprocedure('public.protect_superadmin_profile()') is not null, 'SuperAdmin profile protection trigger function exists');
+select ok(to_regprocedure('public.protect_superadmin_auth_identity()') is not null, 'SuperAdmin Auth identity protection trigger function exists');
 
 select * from finish();
 rollback;

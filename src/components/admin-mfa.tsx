@@ -48,5 +48,19 @@ export function AdminMfa() {
     finally { setBusy(false); }
   }
 
-  return <section className="glass mt-5 rounded-2xl p-5 sm:p-7"><h2 className="text-xl font-bold">Administrator sign-in protection</h2><p className="mt-2 text-sm leading-6 text-slate-300">Staff actions require an authenticator app and a recent two-factor session. Keep the setup key private. If you lose access, use the organization recovery process; do not disable MFA from this page.</p><p role="status" className="mt-4 text-sm text-indigo-100">{status}</p>{!factorId && !secret && <button disabled={busy} onClick={enroll} className="gradient-bg mt-4 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-50">Set up authenticator</button>}{secret && <div className="mt-4 space-y-3"><label className="block space-y-2 text-xs text-slate-300">Authenticator setup key<span className="block select-all break-all rounded-lg border border-amber-300/30 bg-slate-950 p-3 font-mono text-sm text-amber-100">{secret}</span></label><label className="block space-y-2 text-xs text-slate-300">Six-digit code<input value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" className="field max-w-48" /></label><button disabled={busy} onClick={verify} className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold disabled:opacity-50">Verify and enable</button></div>}</section>;
+  async function verifyForSession() {
+    if (!factorId || !/^\d{6}$/.test(code)) { setStatus("Enter the six-digit code from your authenticator app."); return; }
+    setBusy(true);
+    try {
+      const supabase = createSupabaseBrowserClient();
+      const { data: challenge, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
+      if (challengeError) throw challengeError;
+      const { error } = await supabase.auth.mfa.verify({ factorId, challengeId: challenge.id, code });
+      if (error) throw error;
+      setCode(""); await refresh();
+    } catch (error) { setStatus(error instanceof Error ? error.message : "Authenticator verification failed."); }
+    finally { setBusy(false); }
+  }
+
+  return <section className="glass mt-5 rounded-2xl p-5 sm:p-7"><h2 className="text-xl font-bold">Administrator sign-in protection</h2><p className="mt-2 text-sm leading-6 text-slate-300">Staff actions require an authenticator app and a recent two-factor session. Keep the setup key private. If you lose access, use the organization recovery process; do not disable MFA from this page.</p><p role="status" className="mt-4 text-sm text-indigo-100">{status}</p>{!factorId && !secret && <button disabled={busy} onClick={enroll} className="gradient-bg mt-4 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-50">Set up authenticator</button>}{secret && <div className="mt-4 space-y-3"><label className="block space-y-2 text-xs text-slate-300">Authenticator setup key<span className="block select-all break-all rounded-lg border border-amber-300/30 bg-slate-950 p-3 font-mono text-sm text-amber-100">{secret}</span></label><label className="block space-y-2 text-xs text-slate-300">Six-digit code<input value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" className="field max-w-48" /></label><button disabled={busy} onClick={verify} className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold disabled:opacity-50">Verify and enable</button></div>}{factorId && !secret && <div className="mt-4 space-y-3"><label className="block space-y-2 text-xs text-slate-300">Authenticator code for this session<input value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" className="field max-w-48" /></label><button disabled={busy} onClick={verifyForSession} className="rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold disabled:opacity-50">Verify authenticator</button></div>}</section>;
 }

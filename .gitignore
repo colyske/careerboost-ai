@@ -13,6 +13,7 @@
 # testing
 /coverage
 /work-tmp
+/.tmp
 
 # next.js
 /.next/
@@ -41,3 +42,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.vercel
+.env*

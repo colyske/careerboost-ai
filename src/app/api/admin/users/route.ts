@@ -38,8 +38,8 @@ export async function POST(request: Request) {
   if (typeof value?.targetUserId !== "string" || !/^[\da-f-]{36}$/i.test(value.targetUserId)) return NextResponse.json({ error: "Invalid account." }, { status: 400 });
   const admin = createSupabaseAdminClient();
   if (value.role !== undefined) {
-    if (role !== "owner") return NextResponse.json({ error: "Only the organization owner can change roles." }, { status: 403 });
-    if (value.role !== "candidate" && value.role !== "admin") return NextResponse.json({ error: "Invalid role." }, { status: 400 });
+    if (role !== "owner") return NextResponse.json({ error: "SuperAdmin access required to change roles." }, { status: 403 });
+    if (value.role !== "candidate" && value.role !== "admin" && value.role !== "owner") return NextResponse.json({ error: "Invalid role." }, { status: 400 });
     const { error } = await admin.rpc("admin_set_user_role", { p_actor_id: user.id, p_target_user_id: value.targetUserId, p_new_role: value.role });
     if (error) return NextResponse.json({ error: "Role change was not applied." }, { status: 409 });
     return NextResponse.json({ updated: true });

@@ -10,6 +10,9 @@ export async function DELETE(request: Request) {
   const supabase = await createSupabaseServerClient();
   const { data: auth, error: authError } = await supabase.auth.getUser();
   if (authError || !auth.user?.email) return NextResponse.json({ error: "Sign in required." }, { status: 401 });
+  const { data: currentProfile, error: profileError } = await supabase.from("profiles").select("role,email").eq("id", auth.user.id).single();
+  if (profileError) return NextResponse.json({ error: "Account status could not be checked." }, { status: 503 });
+  if (currentProfile.role === "owner" && currentProfile.email.toLowerCase() === "colyske@gmail.com") return NextResponse.json({ error: "The primary SuperAdmin account is protected from deletion." }, { status: 403 });
   let body: unknown;
   try { body = await request.json(); } catch { return NextResponse.json({ error: "Confirm account deletion." }, { status: 400 }); }
   const confirmation = (body as { email?: unknown } | null)?.email;

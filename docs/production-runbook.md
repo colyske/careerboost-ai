@@ -6,13 +6,8 @@ The repository does not contain production credentials and must not receive real
 
 1. Create separate Vercel and Supabase projects for staging and production. Choose regions after documenting client locations, provider subprocessors, cross-border transfers, latency, and applicable privacy requirements. Set a custom production domain and TLS. Keep Vercel Fluid Compute enabled or verify the configured 20–45 second function limits fit the selected plan; the AI route can wait up to 30 seconds for Gemini.
 2. Keep production Supabase and Paystack credentials out of preview deployments. Restrict Vercel production access, Supabase organization/project roles, GitHub maintainers, and Paystack dashboard users to named staff with MFA. Use separate provider keys for staging and production.
-3. Configure a verified Supabase SMTP sender, email confirmation, password recovery redirect URLs, site URL, and production allowed redirect URLs. Enable Supabase CAPTCHA/rate protection for public signups and review password/MFA policy. Create the organization owner account through verified signup, then promote that account once using the controlled SQL below; do not expose the service key to a browser.
-
-```sql
-update public.profiles set role = 'owner' where email = 'OWNER_EMAIL';
-```
-
-Run that once in the production SQL editor after verifying the address, then remove access to the SQL editor from routine operators. Require authenticator MFA for owner/admin accounts before any staff tools are used.
+3. Configure a verified Supabase SMTP sender, email confirmation, password recovery redirect URLs, site URL, and production allowed redirect URLs. Enable Supabase CAPTCHA/rate protection for public signups and review password/MFA policy. The verified `colyske@gmail.com` account is the permanent primary SuperAdmin; the database prevents demotion, email identity changes, and deletion. All SuperAdmins can change candidate, administrator, and other SuperAdmin roles. Additional SuperAdmins remain manageable and can be deleted; only the primary account is protected. Apply the `202610080003_manageable_superadmins.sql` and `202610080004_superadmin_delegation.sql` migrations after the earlier protection migration. Require authenticator MFA before using staff tools.
+4. Configure Google OAuth in Supabase Auth and set `NEXT_PUBLIC_GOOGLE_AUTH_ENABLED=true` only after callback/redirect allow-lists are correct. The application callback must be allow-listed as `https://YOUR_DOMAIN/auth/callback` and the Supabase provider callback must be added to Google Cloud's authorized redirect URIs.
 
 ## 2. Supabase migrations and secrets
 
@@ -33,6 +28,9 @@ Set the following in Vercel **Production** and **Preview** environments as appro
 | `PAYSTACK_EXECUTIVE_AMOUNT_SUBUNITS` | Positive integer in provider subunits, approved price |
 | `GEMINI_API_KEY` | Optional, server-only, restricted project key |
 | `GEMINI_MODEL` | Explicit model available to the selected Google project |
+| `NEXT_PUBLIC_GOOGLE_AUTH_ENABLED` | Set `true` only after configuring the Google provider and redirects in Supabase; otherwise leave `false` |
+| `CAREERONESTOP_USER_ID` | Optional CareerOneStop account identifier for U.S. wage insights |
+| `CAREERONESTOP_API_TOKEN` | Optional server-only CareerOneStop API token; never use a `NEXT_PUBLIC_` prefix |
 | `CRON_SECRET` | Random high-entropy secret; cron endpoint expects `Bearer <secret>` |
 
 Configure no production secrets in CI unless a deployment step requires them. The checks job uses inert build-only placeholders and must never connect to production data.
@@ -50,7 +48,7 @@ Before launch, publish the actual data controller, privacy contact, terms, refun
 
 The app's current cleanup job redacts account email from failed/expired payment orders after 30 days and successful orders after 90 days. Account deletion removes Auth identity, profile and course completions, detaches ledger rows, and redacts order email, while retaining payment reference/amount/currency/provider transaction ID for reconciliation. These are implementation defaults, **not a determination of legally appropriate retention**. Confirm the schedule against tax, dispute, refund, and privacy duties; revise the migration and notice before launch if needed. Supabase backups and Vercel/Supabase operational logs may outlive in-app deletion. Set access and retention in each provider dashboard and document the exceptions to deletion.
 
-Gemini requests are transient at the app layer; review Google's current API data terms and project settings before enabling it. Give candidates a privacy notice immediately before sending data. Avoid sending fields that are not needed. Configure Vercel/Supabase data processing terms and region consistently with the published notice.
+Gemini career-tool requests are transient at the app layer; review Google's current API data terms and project settings before enabling it. Google Search grounding for salary research requires an active billed Gemini API project and Google says it retains grounding prompts and outputs for 30 days. Give candidates a clear opt-in before sending job title/location to Google. Avoid sending fields that are not needed. Configure Vercel/Supabase data processing terms and region consistently with the published notice.
 
 ## 5. GitHub CI and Vercel deployment
 
